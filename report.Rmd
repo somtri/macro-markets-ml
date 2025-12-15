@@ -1,0 +1,375 @@
+---
+title: "Macro & Markets: Returns, Unemployment, and ML"
+author: "Som Tripathi"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+library(tidyverse)
+library(lubridate)
+library(tidyquant)
+```
+
+
+## Data: S&P 500 prices (Yahoo Finance)
+
+We pull daily S&P 500 index prices (ticker `^GSPC`) from Yahoo Finance using `tidyquant`.
+This keeps the report reproducible because the data is retrieved directly in code.
+
+```{r get-sp500}
+sp500_raw <- tq_get("^GSPC", from = "2000-01-01", get = "stock.prices")
+
+# quick checks
+dplyr::glimpse(sp500_raw)
+dplyr::summarise(sp500_raw,
+  start_date = min(date),
+  end_date   = max(date),
+  n_rows     = n()
+)
+```
+
+
+## Cleaning: daily log returns
+
+We compute daily log returns from the adjusted close price:
+
+Return = log(adjusted_today / adjusted_yesterday)
+
+This creates a stationary-ish series that’s easier to summarize and aggregate than raw prices.
+
+```{r clean-sp500}
+sp500_daily <- sp500_raw %>%
+  arrange(date) %>%
+  mutate(daily_log_return = log(adjusted / lag(adjusted))) %>%
+  drop_na(daily_log_return)
+
+# sanity checks
+dplyr::summarise(sp500_daily,
+  start_date = min(date),
+  end_date   = max(date),
+  n_rows     = n(),
+  mean_return = mean(daily_log_return),
+  sd_return   = sd(daily_log_return)
+)
+```
+
+
+## Marginal summaries: daily market behavior
+
+This section summarizes the distribution of daily returns and shows how the index level
+changes over time.
+
+```{r sp500-marginal-summary}
+# numeric summaries
+sp500_daily %>%
+  summarise(
+    n_days = n(),
+    min_return = min(daily_log_return),
+    q05_return = quantile(daily_log_return, 0.05),
+    median_return = median(daily_log_return),
+    mean_return = mean(daily_log_return),
+    q95_return = quantile(daily_log_return, 0.95),
+    max_return = max(daily_log_return)
+  )
+```
+
+# price level over time
+
+```{r}
+sp500_raw %>%
+ggplot(aes(x = date, y = adjusted)) +
+geom_line() +
+labs(
+title = "S&P 500 adjusted close (2000+)",
+x = "Date",
+y = "Adjusted close"
+)
+```
+
+
+# distribution of daily log returns
+
+```{r}
+sp500_daily %>%
+ggplot(aes(x = daily_log_return)) +
+geom_histogram(bins = 70) +
+labs(
+title = "Distribution of daily log returns (S&P 500)",
+x = "Daily log return",
+y = "Count"
+)
+```
+
+
+## Data: Unemployment rate (FRED)
+
+We pull monthly U.S. unemployment data (series `UNRATE`) from FRED using `tidyquant`.
+This is measured in percent and is typically reported monthly.
+
+```{r get-unemployment}
+unemp_raw <- tq_get("UNRATE", from = "2000-01-01", get = "economic.data")
+
+# quick checks
+dplyr::glimpse(unemp_raw)
+dplyr::summarise(unemp_raw,
+  start_date = min(date),
+  end_date   = max(date),
+  n_rows     = n()
+)
+```
+
+
+## Cleaning + marginal summary: unemployment rate
+
+`tidyquant` stores the unemployment series value in a column called `price`.
+We rename it to `unemployment_rate` to make the code easier to read.
+
+```{r clean-unemployment}
+unemp_monthly <- unemp_raw %>%
+  rename(unemployment_rate = price) %>%
+  arrange(date)
+
+# numeric summary
+unemp_monthly %>%
+  summarise(
+    n_months = n(),
+    min_unemp = min(unemployment_rate),
+    q05_unemp = quantile(unemployment_rate, 0.05),
+    median_unemp = median(unemployment_rate),
+    mean_unemp = mean(unemployment_rate),
+    q95_unemp = quantile(unemployment_rate, 0.95),
+    max_unemp = max(unemployment_rate)
+  )
+```
+```{r}
+unemp_monthly %>%
+ggplot(aes(x = date, y = unemployment_rate)) +
+geom_line() +
+labs(
+title = "U.S. Unemployment Rate (UNRATE, 2000+)",
+x = "Date",
+y = "Unemployment rate (%)"
+)
+```
+
+
+## Monthly market features + join with unemployment
+
+Unemployment is monthly, so we aggregate daily S&P 500 returns to monthly features:
+- mean monthly log return (average of daily log returns within the month)
+- monthly volatility proxy (sd of daily log returns within the month)
+
+Then we join on the month.
+
+```{r build-monthly-and-join}
+sp500_monthly <- sp500_daily %>%
+  mutate(month_date = floor_date(date, unit = "month")) %>%
+  group_by(month_date) %>%
+  summarise(
+    mean_log_return = mean(daily_log_return),
+    sd_log_return   = sd(daily_log_return),
+    n_trading_days  = n(),
+    .groups = "drop"
+  )
+
+macro_market_monthly <- sp500_monthly %>%
+  inner_join(unemp_monthly, by = c("month_date" = "date"))
+```
+# quick checks
+```{r}
+dplyr::glimpse(macro_market_monthly)
+dplyr::summarise(macro_market_monthly,
+  start_month = min(month_date),
+  end_month   = max(month_date),
+  n_months    = n()
+)
+```
+
+
+
+## Joint relationships: unemployment vs returns and volatility
+
+These plots show how monthly market behavior changes across unemployment conditions.
+Each point is one month.
+
+```{r joint-plots, fig.width=7, fig.height=4}
+# Returns vs unemployment
+macro_market_monthly %>%
+  ggplot(aes(x = unemployment_rate, y = mean_log_return)) +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(
+    title = "Monthly mean log return vs unemployment rate",
+    x = "Unemployment rate (%)",
+    y = "Mean monthly log return"
+  )
+```
+# Volatility vs unemployment
+```{r}
+macro_market_monthly %>%
+  ggplot(aes(x = unemployment_rate, y = sd_log_return)) +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(
+    title = "Monthly volatility (sd of daily returns) vs unemployment rate",
+    x = "Unemployment rate (%)",
+    y = "Monthly volatility (sd of daily log returns)"
+  )
+```
+
+
+## Regimes: high vs low unemployment
+
+To make the comparison clearer, we split months into "low" vs "high" unemployment.
+Here we use the median unemployment rate as the cutoff.
+
+```{r regimes}
+cutoff <- median(macro_market_monthly$unemployment_rate)
+
+macro_regime <- macro_market_monthly %>%
+  mutate(
+    unemp_regime = if_else(unemployment_rate > cutoff, "High unemployment", "Low unemployment")
+  )
+```
+# summary table by regime
+```{r}
+regime_summary <- macro_regime %>%
+  group_by(unemp_regime) %>%
+  summarise(
+    n_months = n(),
+    avg_return = mean(mean_log_return),
+    avg_volatility = mean(sd_log_return),
+    .groups = "drop"
+  )
+
+regime_summary
+```
+# compare returns by regime
+
+```{r}
+macro_regime %>%
+ggplot(aes(x = unemp_regime, y = mean_log_return)) +
+geom_boxplot() +
+labs(
+title = "Monthly returns by unemployment regime",
+x = "",
+y = "Mean monthly log return"
+)
+```
+
+
+# compare volatility by regime
+
+```{r}
+macro_regime %>%
+ggplot(aes(x = unemp_regime, y = sd_log_return)) +
+geom_boxplot() +
+labs(
+title = "Monthly volatility by unemployment regime",
+x = "",
+y = "Monthly volatility (sd of daily log returns)"
+)
+```
+
+
+## ML setup: predict next month direction
+
+We define a binary target:
+- `next_month_up = 1` if next month's mean log return is positive, else 0.
+
+Features use only information available in the current month:
+- unemployment_rate
+- change in unemployment (this month - last month)
+- current month return and volatility
+
+We split by time (train on earlier years, test on later years) to avoid leakage.
+
+```{r ml-dataset}
+ml_data <- macro_market_monthly %>%
+  arrange(month_date) %>%
+  mutate(
+    next_mean_log_return = lead(mean_log_return),
+    next_month_up = if_else(next_mean_log_return > 0, 1, 0),
+    unemp_change = unemployment_rate - lag(unemployment_rate)
+  ) %>%
+  drop_na(next_mean_log_return, unemp_change)
+```
+# time split cutoff (feel free to change later)
+```{r}
+train_data <- ml_data %>% filter(year(month_date) <= 2015)
+test_data  <- ml_data %>% filter(year(month_date) > 2015)
+```
+# quick checks
+```{r}
+c(nrow(train_data), nrow(test_data))
+test_data %>% summarise(up_rate = mean(next_month_up))
+```
+
+
+## Model 1: Logistic regression
+
+We use logistic regression to estimate the probability that next month is "up".
+This is a strong baseline because it’s simple, interpretable, and easy to reproduce.
+
+```{r fit-logistic}
+logit_fit <- glm(
+  next_month_up ~ unemployment_rate + unemp_change + mean_log_return + sd_log_return,
+  data = train_data,
+  family = binomial()
+)
+
+summary(logit_fit)
+```
+
+
+## Evaluation: test performance + baseline
+
+We evaluate on the held-out test period (years > 2015).
+We also compare against a simple baseline: always predict "up".
+
+```{r eval-logistic}
+# predicted probabilities for "up"
+test_probs <- predict(logit_fit, newdata = test_data, type = "response")
+
+# classify using 0.5 threshold
+test_pred <- if_else(test_probs >= 0.5, 1, 0)
+
+# confusion matrix
+table(
+  Actual = test_data$next_month_up,
+  Predicted = test_pred
+)
+
+# accuracy
+acc_model <- mean(test_pred == test_data$next_month_up)
+
+# baseline: always predict up
+baseline_pred <- rep(1, nrow(test_data))
+acc_baseline <- mean(baseline_pred == test_data$next_month_up)
+
+c(model_accuracy = acc_model, baseline_accuracy = acc_baseline)
+```
+
+In the held-out test period, the logistic regression model achieved about 65.5% accuracy, while a naive baseline that always predicts an “up” month achieved about 69.0% accuracy. This indicates that the simple feature set used here (unemployment level, unemployment change, current-month return, and current-month volatility) does not provide strong predictive power for next-month market direction. This result is expected in real financial data because returns are noisy and many drivers are not captured in a small macro-only feature set. The model is still useful as a transparent baseline and as a demonstration of a time-respecting ML workflow.
+
+
+```{r prob-over-time, fig.width=7, fig.height=4}
+test_plot_df <- test_data %>%
+  mutate(pred_prob_up = test_probs)
+
+test_plot_df %>%
+  ggplot(aes(x = month_date, y = pred_prob_up)) +
+  geom_line() +
+  labs(
+    title = "Predicted probability of an up month (test period)",
+    x = "Month",
+    y = "Predicted P(next month up)"
+  )
+```
+
