@@ -1,0 +1,21 @@
+Package: macromarketsml
+Type: Project
+Title: Macro Signals and U.S. Equity Returns
+Version: 0.1.0
+Authors@R: person("Som", "Tripathi", role = c("aut", "cre"))
+Description: A reproducible, release-aware study of whether unemployment
+    and recent market behavior help classify next-month S&P 500 direction.
+License: MIT
+Encoding: UTF-8
+Imports:
+    dplyr,
+    ggplot2,
+    knitr,
+    lubridate,
+    rmarkdown,
+    scales,
+    tibble,
+    tidyr,
+    tidyquant
+Suggests:
+    renv

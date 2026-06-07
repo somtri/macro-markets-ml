@@ -1,375 +1,417 @@
 ---
-title: "Macro & Markets: Returns, Unemployment, and ML"
+title: "Macro Signals and U.S. Equity Returns"
+subtitle: "A release-aware, out-of-sample classification study"
 author: "Som Tripathi"
+date: "December 15, 2025"
 output:
   html_document:
     toc: true
-    toc_depth: 2
+    toc_float: true
+    toc_depth: 3
     number_sections: true
+    code_folding: hide
+    self_contained: true
+    css: styles.css
+    highlight: tango
+params:
+  analysis_start: "2000-01-01"
+  train_end: "2015-12-31"
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 9,
+  fig.height = 5,
+  fig.retina = 2,
+  out.width = "100%"
+)
 
-library(tidyverse)
+library(dplyr)
+library(ggplot2)
 library(lubridate)
+library(scales)
+library(tibble)
+library(tidyr)
 library(tidyquant)
+
+portfolio_colors <- c(
+  navy = "#12263A",
+  blue = "#2563EB",
+  teal = "#0F766E",
+  gold = "#D97706",
+  red = "#B91C1C",
+  slate = "#64748B",
+  pale = "#E2E8F0"
+)
+
+theme_set(
+  theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold", color = portfolio_colors[["navy"]]),
+      plot.subtitle = element_text(color = portfolio_colors[["slate"]]),
+      axis.title = element_text(face = "bold"),
+      panel.grid.minor = element_blank(),
+      legend.position = "bottom",
+      plot.caption = element_text(color = portfolio_colors[["slate"]])
+    )
+)
+
+options(scipen = 999)
+source("R/analysis.R", local = knitr::knit_global())
 ```
 
+<div class="hero">
+<p class="eyebrow">PORTFOLIO CASE STUDY</p>
+<p class="lede">Can the unemployment rate, combined with recent market behavior, improve forecasts of next-month S&amp;P 500 direction?</p>
+</div>
 
-## Data: S&P 500 prices (Yahoo Finance)
+## Executive summary
 
-We pull daily S&P 500 index prices (ticker `^GSPC`) from Yahoo Finance using `tidyquant`.
-This keeps the report reproducible because the data is retrieved directly in code.
+```{r executive-summary, echo=FALSE, results='asis'}
+model_accuracy <- metric_value("Logistic regression", "Accuracy")
+baseline_accuracy <- metric_value("Historical up-rate baseline", "Accuracy")
+model_auc <- metric_value("Logistic regression", "ROC AUC")
 
-```{r get-sp500}
-sp500_raw <- tq_get("^GSPC", from = "2000-01-01", get = "stock.prices")
-
-# quick checks
-dplyr::glimpse(sp500_raw)
-dplyr::summarise(sp500_raw,
-  start_date = min(date),
-  end_date   = max(date),
-  n_rows     = n()
+cat(
+  '<div class="metric-grid">',
+  sprintf(
+    '<div class="metric-card"><span class="metric-value">%s</span><span class="metric-label">Out-of-sample accuracy</span></div>',
+    percent(model_accuracy, accuracy = 0.1)
+  ),
+  sprintf(
+    '<div class="metric-card"><span class="metric-value">%s</span><span class="metric-label">Baseline accuracy</span></div>',
+    percent(baseline_accuracy, accuracy = 0.1)
+  ),
+  sprintf(
+    '<div class="metric-card"><span class="metric-value">%.2f</span><span class="metric-label">Out-of-sample ROC AUC</span></div>',
+    model_auc
+  ),
+  sprintf(
+    '<div class="metric-card"><span class="metric-value">%s</span><span class="metric-label">Test observations</span></div>',
+    comma(nrow(test_data))
+  ),
+  '</div>'
 )
 ```
 
+This study uses monthly observations from **`r format(min(model_data$month_date), "%B %Y")`**
+through **`r format(max(model_data$month_date), "%B %Y")`**. A logistic regression is
+trained through **`r format(as.Date(params$train_end), "%B %Y")`** and evaluated only on
+later observations.
 
-## Cleaning: daily log returns
+> **Bottom line.** `r performance_summary` The result is useful precisely because the
+> benchmark is difficult to beat: U.S. equity months are positive more often than they
+> are negative, so headline accuracy without a baseline can be misleading.
 
-We compute daily log returns from the adjusted close price:
+## Research design
 
-Return = log(adjusted_today / adjusted_yesterday)
+The unit of analysis is one calendar month. At the close of month \(t\), the model uses:
 
-This creates a stationary-ish series that’s easier to summarize and aggregate than raw prices.
+- the latest unemployment rate that would have been published by then;
+- the latest published monthly change in unemployment;
+- the S&P 500 return during month \(t\); and
+- annualized daily volatility during month \(t\).
 
-```{r clean-sp500}
+It predicts whether the S&P 500 return in month \(t+1\) will be positive.
+
+```{r design-table, echo=FALSE}
+design_table <- tribble(
+  ~Component, ~Choice, ~Reason,
+  "Target", "Next-month S&P 500 direction", "Clear binary outcome with an investable forecast horizon",
+  "Macro timing", "Unemployment lagged one month", "Avoids using a value before its public release",
+  "Validation", "Chronological holdout", "Preserves ordering and prevents random-split leakage",
+  "Baseline", "Training-period up rate", "Measures whether the model beats the market's class imbalance",
+  "Metrics", "Accuracy, balanced accuracy, Brier score, ROC AUC", "Covers classification and probability quality"
+)
+
+knitr::kable(design_table, align = c("l", "l", "l"))
+```
+
+### Why publication timing matters
+
+The unemployment rate for a given month is generally released during the following
+month. Treating month \(t\)'s unemployment rate as known during month \(t\) creates
+look-ahead bias. This analysis conservatively maps each unemployment observation to the
+next calendar month, when it is available to a forecaster.
+
+## Data and preparation
+
+The repository includes versioned raw-data snapshots from two public sources:
+
+- [Yahoo Finance](https://finance.yahoo.com/quote/%5EGSPC/history) for daily adjusted
+  S&P 500 prices (`^GSPC`);
+- [FRED](https://fred.stlouisfed.org/series/UNRATE) for the monthly U.S. unemployment
+  rate (`UNRATE`).
+
+By default, the report renders from those snapshots so the analysis remains available
+when an upstream service is unavailable. Setting `REFRESH_DATA=true` attempts a live
+refresh and updates the snapshots when successful. This render used
+**`r sp500_data_source`** and **`r unemployment_data_source`**.
+
+The current, incomplete market month is excluded. Monthly returns are compounded from
+daily log returns, while volatility is the standard deviation of daily log returns
+annualized with \(\sqrt{252}\).
+
+```{r coverage-table, echo=FALSE}
+knitr::kable(coverage_table, align = c("l", "l", "l", "r"))
+```
+
+```{r data-preparation}
 sp500_daily <- sp500_raw %>%
   arrange(date) %>%
   mutate(daily_log_return = log(adjusted / lag(adjusted))) %>%
-  drop_na(daily_log_return)
+  filter(!is.na(daily_log_return))
 
-# sanity checks
-dplyr::summarise(sp500_daily,
-  start_date = min(date),
-  end_date   = max(date),
-  n_rows     = n(),
-  mean_return = mean(daily_log_return),
-  sd_return   = sd(daily_log_return)
-)
-```
-
-
-## Marginal summaries: daily market behavior
-
-This section summarizes the distribution of daily returns and shows how the index level
-changes over time.
-
-```{r sp500-marginal-summary}
-# numeric summaries
-sp500_daily %>%
-  summarise(
-    n_days = n(),
-    min_return = min(daily_log_return),
-    q05_return = quantile(daily_log_return, 0.05),
-    median_return = median(daily_log_return),
-    mean_return = mean(daily_log_return),
-    q95_return = quantile(daily_log_return, 0.95),
-    max_return = max(daily_log_return)
-  )
-```
-
-# price level over time
-
-```{r}
-sp500_raw %>%
-ggplot(aes(x = date, y = adjusted)) +
-geom_line() +
-labs(
-title = "S&P 500 adjusted close (2000+)",
-x = "Date",
-y = "Adjusted close"
-)
-```
-
-
-# distribution of daily log returns
-
-```{r}
-sp500_daily %>%
-ggplot(aes(x = daily_log_return)) +
-geom_histogram(bins = 70) +
-labs(
-title = "Distribution of daily log returns (S&P 500)",
-x = "Daily log return",
-y = "Count"
-)
-```
-
-
-## Data: Unemployment rate (FRED)
-
-We pull monthly U.S. unemployment data (series `UNRATE`) from FRED using `tidyquant`.
-This is measured in percent and is typically reported monthly.
-
-```{r get-unemployment}
-unemp_raw <- tq_get("UNRATE", from = "2000-01-01", get = "economic.data")
-
-# quick checks
-dplyr::glimpse(unemp_raw)
-dplyr::summarise(unemp_raw,
-  start_date = min(date),
-  end_date   = max(date),
-  n_rows     = n()
-)
-```
-
-
-## Cleaning + marginal summary: unemployment rate
-
-`tidyquant` stores the unemployment series value in a column called `price`.
-We rename it to `unemployment_rate` to make the code easier to read.
-
-```{r clean-unemployment}
-unemp_monthly <- unemp_raw %>%
-  rename(unemployment_rate = price) %>%
-  arrange(date)
-
-# numeric summary
-unemp_monthly %>%
-  summarise(
-    n_months = n(),
-    min_unemp = min(unemployment_rate),
-    q05_unemp = quantile(unemployment_rate, 0.05),
-    median_unemp = median(unemployment_rate),
-    mean_unemp = mean(unemployment_rate),
-    q95_unemp = quantile(unemployment_rate, 0.95),
-    max_unemp = max(unemployment_rate)
-  )
-```
-```{r}
-unemp_monthly %>%
-ggplot(aes(x = date, y = unemployment_rate)) +
-geom_line() +
-labs(
-title = "U.S. Unemployment Rate (UNRATE, 2000+)",
-x = "Date",
-y = "Unemployment rate (%)"
-)
-```
-
-
-## Monthly market features + join with unemployment
-
-Unemployment is monthly, so we aggregate daily S&P 500 returns to monthly features:
-- mean monthly log return (average of daily log returns within the month)
-- monthly volatility proxy (sd of daily log returns within the month)
-
-Then we join on the month.
-
-```{r build-monthly-and-join}
 sp500_monthly <- sp500_daily %>%
-  mutate(month_date = floor_date(date, unit = "month")) %>%
+  mutate(month_date = floor_date(date, "month")) %>%
   group_by(month_date) %>%
   summarise(
-    mean_log_return = mean(daily_log_return),
-    sd_log_return   = sd(daily_log_return),
-    n_trading_days  = n(),
+    monthly_log_return = sum(daily_log_return),
+    monthly_return = exp(monthly_log_return) - 1,
+    annualized_volatility = sd(daily_log_return) * sqrt(252),
+    n_trading_days = n(),
     .groups = "drop"
   )
-
-macro_market_monthly <- sp500_monthly %>%
-  inner_join(unemp_monthly, by = c("month_date" = "date"))
-```
-# quick checks
-```{r}
-dplyr::glimpse(macro_market_monthly)
-dplyr::summarise(macro_market_monthly,
-  start_month = min(month_date),
-  end_month   = max(month_date),
-  n_months    = n()
-)
 ```
 
+### Market history
 
-
-## Joint relationships: unemployment vs returns and volatility
-
-These plots show how monthly market behavior changes across unemployment conditions.
-Each point is one month.
-
-```{r joint-plots, fig.width=7, fig.height=4}
-# Returns vs unemployment
-macro_market_monthly %>%
-  ggplot(aes(x = unemployment_rate, y = mean_log_return)) +
-  geom_point(alpha = 0.7) +
-  geom_smooth(method = "lm", se = FALSE) +
+```{r market-history, echo=FALSE}
+ggplot(sp500_raw, aes(date, adjusted)) +
+  geom_line(linewidth = 0.55, color = portfolio_colors[["blue"]]) +
+  scale_y_log10(labels = label_dollar()) +
   labs(
-    title = "Monthly mean log return vs unemployment rate",
-    x = "Unemployment rate (%)",
-    y = "Mean monthly log return"
+    title = "The S&P 500 across multiple market cycles",
+    subtitle = "Adjusted close shown on a logarithmic scale",
+    x = NULL,
+    y = "Adjusted close (log scale)",
+    caption = "Source: Yahoo Finance via tidyquant"
   )
 ```
-# Volatility vs unemployment
-```{r}
-macro_market_monthly %>%
-  ggplot(aes(x = unemployment_rate, y = sd_log_return)) +
-  geom_point(alpha = 0.7) +
-  geom_smooth(method = "lm", se = FALSE) +
+
+```{r unemployment-history, echo=FALSE}
+ggplot(unemp_monthly, aes(date, unemployment_rate)) +
+  geom_area(fill = portfolio_colors[["pale"]], color = portfolio_colors[["teal"]],
+            linewidth = 0.55) +
   labs(
-    title = "Monthly volatility (sd of daily returns) vs unemployment rate",
+    title = "U.S. unemployment captures distinct macro regimes",
+    subtitle = "The pandemic spike is retained rather than winsorized",
+    x = NULL,
+    y = "Unemployment rate (%)",
+    caption = "Source: FRED series UNRATE via tidyquant"
+  )
+```
+
+### Descriptive relationships
+
+These plots are descriptive, not causal. They show the contemporaneous relationship
+between unemployment conditions and market behavior without claiming that unemployment
+alone drives returns.
+
+```{r descriptive-relationships, echo=FALSE}
+ggplot(descriptive_data, aes(unemployment_rate, monthly_return)) +
+  geom_hline(yintercept = 0, color = portfolio_colors[["pale"]]) +
+  geom_point(alpha = 0.55, color = portfolio_colors[["navy"]]) +
+  geom_smooth(method = "lm", se = TRUE, color = portfolio_colors[["gold"]],
+              fill = alpha(portfolio_colors[["gold"]], 0.15)) +
+  scale_y_continuous(labels = label_percent()) +
+  labs(
+    title = "Monthly returns remain noisy across unemployment levels",
     x = "Unemployment rate (%)",
-    y = "Monthly volatility (sd of daily log returns)"
+    y = "S&P 500 monthly return",
+    caption = "Each point represents one month"
   )
 ```
 
-
-## Regimes: high vs low unemployment
-
-To make the comparison clearer, we split months into "low" vs "high" unemployment.
-Here we use the median unemployment rate as the cutoff.
-
-```{r regimes}
-cutoff <- median(macro_market_monthly$unemployment_rate)
-
-macro_regime <- macro_market_monthly %>%
-  mutate(
-    unemp_regime = if_else(unemployment_rate > cutoff, "High unemployment", "Low unemployment")
+```{r regime-summary, echo=FALSE}
+ggplot(regime_summary, aes(unemp_regime, avg_volatility, fill = unemp_regime)) +
+  geom_col(width = 0.62, show.legend = FALSE) +
+  geom_text(
+    aes(label = percent(avg_volatility, accuracy = 0.1)),
+    vjust = -0.5,
+    fontface = "bold"
+  ) +
+  scale_fill_manual(values = c(
+    "Lower unemployment" = portfolio_colors[["blue"]],
+    "Higher unemployment" = portfolio_colors[["gold"]]
+  )) +
+  scale_y_continuous(labels = label_percent(), expand = expansion(mult = c(0, 0.12))) +
+  labs(
+    title = "Volatility is higher in high-unemployment regimes",
+    subtitle = "Regimes use the median unemployment rate over the analysis sample",
+    x = NULL,
+    y = "Average annualized volatility"
   )
 ```
-# summary table by regime
-```{r}
-regime_summary <- macro_regime %>%
-  group_by(unemp_regime) %>%
-  summarise(
-    n_months = n(),
-    avg_return = mean(mean_log_return),
-    avg_volatility = mean(sd_log_return),
-    .groups = "drop"
-  )
 
-regime_summary
-```
-# compare returns by regime
+## Modeling
 
-```{r}
-macro_regime %>%
-ggplot(aes(x = unemp_regime, y = mean_log_return)) +
-geom_boxplot() +
-labs(
-title = "Monthly returns by unemployment regime",
-x = "",
-y = "Mean monthly log return"
+### Feature engineering and split
+
+All transformations are calculated in chronological order. Predictor standardization is
+fit on the training sample and then applied unchanged to the test sample.
+
+```{r model-specification}
+feature_names <- c(
+  "available_unemployment",
+  "available_unemp_change",
+  "monthly_return",
+  "annualized_volatility"
 )
-```
 
+train_data <- model_data %>%
+  filter(month_date <= floor_date(as.Date(params$train_end), "month"))
 
-# compare volatility by regime
+test_data <- model_data %>%
+  filter(month_date > floor_date(as.Date(params$train_end), "month"))
 
-```{r}
-macro_regime %>%
-ggplot(aes(x = unemp_regime, y = sd_log_return)) +
-geom_boxplot() +
-labs(
-title = "Monthly volatility by unemployment regime",
-x = "",
-y = "Monthly volatility (sd of daily log returns)"
-)
-```
+feature_center <- vapply(train_data[feature_names], mean, numeric(1))
+feature_scale <- vapply(train_data[feature_names], sd, numeric(1))
 
+train_model <- standardize_features(train_data, feature_center, feature_scale)
+test_model <- standardize_features(test_data, feature_center, feature_scale)
 
-## ML setup: predict next month direction
-
-We define a binary target:
-- `next_month_up = 1` if next month's mean log return is positive, else 0.
-
-Features use only information available in the current month:
-- unemployment_rate
-- change in unemployment (this month - last month)
-- current month return and volatility
-
-We split by time (train on earlier years, test on later years) to avoid leakage.
-
-```{r ml-dataset}
-ml_data <- macro_market_monthly %>%
-  arrange(month_date) %>%
-  mutate(
-    next_mean_log_return = lead(mean_log_return),
-    next_month_up = if_else(next_mean_log_return > 0, 1, 0),
-    unemp_change = unemployment_rate - lag(unemployment_rate)
-  ) %>%
-  drop_na(next_mean_log_return, unemp_change)
-```
-# time split cutoff (feel free to change later)
-```{r}
-train_data <- ml_data %>% filter(year(month_date) <= 2015)
-test_data  <- ml_data %>% filter(year(month_date) > 2015)
-```
-# quick checks
-```{r}
-c(nrow(train_data), nrow(test_data))
-test_data %>% summarise(up_rate = mean(next_month_up))
-```
-
-
-## Model 1: Logistic regression
-
-We use logistic regression to estimate the probability that next month is "up".
-This is a strong baseline because it’s simple, interpretable, and easy to reproduce.
-
-```{r fit-logistic}
 logit_fit <- glm(
-  next_month_up ~ unemployment_rate + unemp_change + mean_log_return + sd_log_return,
-  data = train_data,
+  next_month_up ~ available_unemployment + available_unemp_change +
+    monthly_return + annualized_volatility,
+  data = train_model,
   family = binomial()
 )
-
-summary(logit_fit)
 ```
 
+### Coefficient interpretation
 
-## Evaluation: test performance + baseline
+Because predictors are standardized, each coefficient represents a one-standard-deviation
+increase in that feature while the others are held constant. Confidence intervals that
+cross an odds ratio of 1 indicate weak evidence of a stable directional relationship.
 
-We evaluate on the held-out test period (years > 2015).
-We also compare against a simple baseline: always predict "up".
-
-```{r eval-logistic}
-# predicted probabilities for "up"
-test_probs <- predict(logit_fit, newdata = test_data, type = "response")
-
-# classify using 0.5 threshold
-test_pred <- if_else(test_probs >= 0.5, 1, 0)
-
-# confusion matrix
-table(
-  Actual = test_data$next_month_up,
-  Predicted = test_pred
-)
-
-# accuracy
-acc_model <- mean(test_pred == test_data$next_month_up)
-
-# baseline: always predict up
-baseline_pred <- rep(1, nrow(test_data))
-acc_baseline <- mean(baseline_pred == test_data$next_month_up)
-
-c(model_accuracy = acc_model, baseline_accuracy = acc_baseline)
-```
-
-In the held-out test period, the logistic regression model achieved about 65.5% accuracy, while a naive baseline that always predicts an “up” month achieved about 69.0% accuracy. This indicates that the simple feature set used here (unemployment level, unemployment change, current-month return, and current-month volatility) does not provide strong predictive power for next-month market direction. This result is expected in real financial data because returns are noisy and many drivers are not captured in a small macro-only feature set. The model is still useful as a transparent baseline and as a demonstration of a time-respecting ML workflow.
-
-
-```{r prob-over-time, fig.width=7, fig.height=4}
-test_plot_df <- test_data %>%
-  mutate(pred_prob_up = test_probs)
-
-test_plot_df %>%
-  ggplot(aes(x = month_date, y = pred_prob_up)) +
-  geom_line() +
+```{r coefficient-plot, echo=FALSE}
+ggplot(coefficient_table, aes(odds_ratio, reorder(term_label, odds_ratio))) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = portfolio_colors[["slate"]]) +
+  geom_errorbarh(
+    aes(xmin = conf_low, xmax = conf_high),
+    height = 0.18,
+    color = portfolio_colors[["blue"]]
+  ) +
+  geom_point(size = 3, color = portfolio_colors[["navy"]]) +
+  scale_x_log10() +
   labs(
-    title = "Predicted probability of an up month (test period)",
-    x = "Month",
-    y = "Predicted P(next month up)"
+    title = "Estimated effect of each standardized feature",
+    subtitle = "Odds ratios with 95% confidence intervals",
+    x = "Odds ratio (log scale)",
+    y = NULL
   )
 ```
 
+## Out-of-sample evaluation
+
+The model is evaluated from **`r format(min(test_data$month_date), "%B %Y")`** through
+**`r format(max(test_data$month_date), "%B %Y")`**. The baseline assigns every test
+observation the positive-month probability observed in the training period.
+
+```{r metrics-table, echo=FALSE}
+display_metrics <- evaluation_metrics %>%
+  filter(metric %in% c("Accuracy", "Balanced accuracy", "Brier score", "ROC AUC")) %>%
+  mutate(value = if_else(metric == "Brier score", number(value, accuracy = 0.001),
+                         percent(value, accuracy = 0.1))) %>%
+  tidyr::pivot_wider(names_from = model, values_from = value)
+
+knitr::kable(display_metrics, align = c("l", "r", "r"))
+```
+
+```{r accuracy-comparison, echo=FALSE}
+evaluation_metrics %>%
+  filter(metric %in% c("Accuracy", "Balanced accuracy", "ROC AUC")) %>%
+  ggplot(aes(metric, value, fill = model)) +
+  geom_col(position = position_dodge(width = 0.72), width = 0.64) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = portfolio_colors[["slate"]]) +
+  scale_fill_manual(values = c(
+    "Logistic regression" = portfolio_colors[["blue"]],
+    "Historical up-rate baseline" = portfolio_colors[["slate"]]
+  )) +
+  scale_y_continuous(labels = label_percent(), limits = c(0, 1)) +
+  labs(
+    title = "Performance must be judged against the baseline",
+    subtitle = "The dashed line marks chance-level discrimination",
+    x = NULL,
+    y = "Score",
+    fill = NULL
+  )
+```
+
+### Confusion matrix
+
+```{r confusion-matrix, echo=FALSE}
+ggplot(confusion_matrix, aes(Predicted, Actual, fill = n)) +
+  geom_tile(color = "white", linewidth = 2) +
+  geom_text(aes(label = n), size = 7, fontface = "bold", color = "white") +
+  scale_fill_gradient(low = portfolio_colors[["slate"]], high = portfolio_colors[["blue"]],
+                      guide = "none") +
+  coord_equal() +
+  labs(
+    title = "Out-of-sample confusion matrix",
+    subtitle = "Counts at the fixed 0.50 classification threshold",
+    x = "Predicted class",
+    y = "Actual class"
+  )
+```
+
+### Predicted probability through time
+
+```{r probability-over-time, echo=FALSE}
+ggplot(test_results, aes(month_date, predicted_probability)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = portfolio_colors[["slate"]]) +
+  geom_line(color = portfolio_colors[["blue"]], linewidth = 0.7) +
+  geom_point(aes(color = actual_label), size = 1.8, alpha = 0.85) +
+  scale_color_manual(values = c(
+    "Down month" = portfolio_colors[["red"]],
+    "Up month" = portfolio_colors[["teal"]]
+  )) +
+  scale_y_continuous(labels = label_percent(), limits = c(0, 1)) +
+  labs(
+    title = "Predicted probability of an up month",
+    subtitle = "Point color shows the realized next-month outcome",
+    x = NULL,
+    y = "Predicted probability",
+    color = NULL
+  )
+```
+
+## Conclusions
+
+1. **The evaluation design matters more than the algorithm.** A chronological split,
+   release-aware macro features, and an explicit baseline prevent an optimistic result.
+2. **Unemployment is more informative about market conditions than short-horizon
+   direction.** High-unemployment periods coincide with elevated volatility, but that
+   relationship does not automatically translate into reliable next-month forecasts.
+3. **A weak predictive result is still a useful research result.** The model provides a
+   transparent benchmark and a foundation for testing richer real-time macro indicators,
+   valuation measures, or walk-forward estimation.
+
+## Limitations and next steps
+
+- FRED observations are revised over time; this report uses the latest vintage rather
+  than a real-time vintage database such as ALFRED.
+- The model does not include transaction costs, portfolio sizing, or an investable
+  backtest.
+- One fixed train/test split is transparent but does not measure stability across
+  multiple historical windows.
+- Statistical significance is not economic significance, and this analysis should not
+  be interpreted as investment advice.
+
+A logical extension would use expanding-window validation and real-time macro vintages,
+then compare logistic regression with regularized models while preserving the same
+release-aware feature set.
+
+## Reproducibility
+
+The report was generated on **`r format(Sys.time(), "%Y-%m-%d %H:%M %Z")`** with R
+**`r getRversion()`**. Package versions are recorded in `renv.lock`; the full analysis
+pipeline lives in `R/analysis.R`.
+
+```{r session-info}
+sessionInfo()
+```

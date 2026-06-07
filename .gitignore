@@ -47,3 +47,9 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# Render only to the canonical outputs directory
+/report.html
+
+# Local verification runtimes
+/.tools/
