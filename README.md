@@ -7,7 +7,7 @@
 A reproducible R case study testing whether unemployment and recent market behavior
 help classify next-month S&P 500 direction.
 
-[**View the live portfolio report**](https://somtri.github.io/macro-markets-ml/)
+[**View the hosted portfolio report**](https://somtri.github.io/macro-markets-ml/)
 
 The project is designed as an honest forecasting exercise: macro observations are aligned
 to when they would have been public, the model is evaluated on a chronological holdout,
@@ -22,7 +22,7 @@ small feature set. That negative result is reported directly rather than optimiz
 
 ## View the analysis
 
-- **Live report:** [somtri.github.io/macro-markets-ml](https://somtri.github.io/macro-markets-ml/)
+- **Hosted report:** [somtri.github.io/macro-markets-ml](https://somtri.github.io/macro-markets-ml/)
 - **Versioned report artifact:** [`outputs/report.html`](outputs/report.html)
 - **Report source:** [`report.Rmd`](report.Rmd)
 - **Analysis pipeline:** [`R/analysis.R`](R/analysis.R)
@@ -36,7 +36,13 @@ small feature set. That negative result is reported directly rather than optimiz
 - logistic regression with interpretable standardized coefficients;
 - evaluation against a class-imbalance baseline using accuracy, balanced accuracy,
   Brier score, and ROC AUC;
-- dynamic reporting, so written conclusions update with the data.
+- generated reporting, so metrics and conclusions stay consistent with the selected data.
+
+## Update behavior
+
+The hosted report is republished when changes are pushed to `main`; it does not update
+continuously. Standard renders use the versioned snapshots in `data/raw`. To fetch newer
+source data, run the explicit refresh command below and commit the updated snapshots.
 
 ## Research design
 

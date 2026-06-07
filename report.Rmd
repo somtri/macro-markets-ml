@@ -2,7 +2,6 @@
 title: "Macro Signals and U.S. Equity Returns"
 subtitle: "A release-aware, out-of-sample classification study"
 author: "Som Tripathi"
-date: "December 15, 2025"
 output:
   html_document:
     toc: true
@@ -408,9 +407,8 @@ release-aware feature set.
 
 ## Reproducibility
 
-The report was generated on **`r format(Sys.time(), "%Y-%m-%d %H:%M %Z")`** with R
-**`r getRversion()`**. Package versions are recorded in `renv.lock`; the full analysis
-pipeline lives in `R/analysis.R`.
+The report was rendered with R **`r getRversion()`**. Package versions are recorded in
+`renv.lock`; the full analysis pipeline lives in `R/analysis.R`.
 
 ```{r session-info}
 sessionInfo()
